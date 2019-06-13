@@ -16,3 +16,7 @@ This Flask app can be run as a Docker container in a cloud function or hosted on
 
 # Contribute
 See Dave Thompson or make a pull request to make changes
+
+# Attributions
+Sendgrid receive functionality built significantly from Sendgrid's MIT licensed Python libraries
+See https://github.com/sendgrid/sendgrid-python/tree/master/sendgrid/helpers/inbound
