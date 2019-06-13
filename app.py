@@ -7,7 +7,7 @@ import pkg_resources
 from exitcode import ExitCode
 from version import __version__
 from email_router import EmailRouterDatabaseSourceType, EmailRouter, EmailRouterSourceIdentifier
-
+from router_instance_type import RouterInstanceType
 APP_NAME = 'EMERALD INBOUND EMAIL READER ROUTER'
 MIN_PYTHON_VER_MAJOR=3
 MIN_PYTHON_VER_MINOR=6
@@ -42,6 +42,13 @@ def emerald_inbound_email_readerrouter_launcher(argv):
     parser.add_argument('--version',
                         action='version',
                         version=__version__)
+    # see comment below about using complex types in argparse
+    parser.add_argument('--router_instance_type',
+                        required=True,
+#                        type=RouterInstanceType.from_string,
+                        type=str,
+                        help='Specify instance type (defines location, data class, etc. - see devops docs)' +
+                        os.linesep + 'Must be one of following: ' + ','.join([x.name for x in RouterInstanceType])),
     parser.add_argument('--host',
                         type=str,
                         action='store',
@@ -62,18 +69,41 @@ def emerald_inbound_email_readerrouter_launcher(argv):
                         default=False,
                         help='Specify to add additional logging as well as debugging mode in Flask')
 
-    args = parser.parse_args(None if argv[0:] else ['--help'])
+    args = parser.parse_args(argv[1:])
 
     logger = logging.getLogger('main')
-    logger.setLevel(logging.DEBUG)
+    logger.setLevel(logging.DEBUG if args.debug else logging.INFO)
+    ch = logging.StreamHandler()
+    ch.setLevel(logging.DEBUG if args.debug else logging.INFO)
+
+    formatter = logging.Formatter('%(asctime)s|%(levelname)s|%(message)s',
+                                  datefmt='%Y-%d-%mT%H:%M:%S%z')
+    ch.setFormatter(formatter)
+
+    logger.addHandler(ch)
+
+    # initialize the router source type since there is no standard way to do this in argparse
+    #  You can do it by setting the type, but the Namespace doesn't handle accessing the values
+    # properly so it is better to make a string and then initialize complex type here
+    try:
+        router_instance_type = RouterInstanceType.from_string(type_name=args.router_instance_type)
+    except ValueError:
+        logger.critical('User specified invalid or unsupported router instance type with --router_instance_type' +
+                        os.linesep + '\tMust be one of: ' + ','.join([x.name for x in RouterInstanceType]))
+        return ExitCode.ARGUMENT_ERROR
 
     router_source_identifier = EmailRouterSourceIdentifier(
-        source_type=EmailRouterDatabaseSourceType.UNSUPPORTED,
+        source_type=EmailRouterDatabaseSourceType.JSONFILE,
         source_uri='my source'
     )
 
+    # log key provided arguments
+    logger.info('Command line arguments: ' + os.linesep + '\t' +
+                (os.linesep + '\t').join([k + ': ' + str(v) for k,v in sorted(vars(args).items())]))
+
     try:
-        test = EmailRouter(router_db_source_identifier=router_source_identifier)
+        test = EmailRouter(router_db_source_identifier=router_source_identifier,
+                           router_instance_type=router_instance_type)
     except ValueError as vex:
         logger.critical('Unable to initialize ' + appname + ': email router initialization error' +
                         os.linesep + 'Exception: ' + str(vex.args[0]))
