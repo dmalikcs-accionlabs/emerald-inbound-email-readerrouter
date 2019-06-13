@@ -6,6 +6,7 @@ import pkg_resources
 
 from exitcode import ExitCode
 from version import __version__
+from email_router import EmailRouterDatabaseSourceType, EmailRouter, EmailRouterSourceIdentifier
 
 APP_NAME = 'EMERALD INBOUND EMAIL READER ROUTER'
 MIN_PYTHON_VER_MAJOR=3
@@ -65,6 +66,18 @@ def emerald_inbound_email_readerrouter_launcher(argv):
 
     logger = logging.getLogger('main')
     logger.setLevel(logging.DEBUG)
+
+    router_source_identifier = EmailRouterSourceIdentifier(
+        source_type=EmailRouterDatabaseSourceType.UNSUPPORTED,
+        source_uri='my source'
+    )
+
+    try:
+        test = EmailRouter(router_db_source_identifier=router_source_identifier)
+    except ValueError as vex:
+        logger.critical('Unable to initialize ' + appname + ': email router initialization error' +
+                        os.linesep + 'Exception: ' + str(vex.args[0]))
+        return ExitCode.ARGUMENT_ERROR
 
     return ExitCode.SUCCESS
 

@@ -1,1 +1,2 @@
-Command invocation notes TBD
+Required API Keys in Environment:
+TBD
