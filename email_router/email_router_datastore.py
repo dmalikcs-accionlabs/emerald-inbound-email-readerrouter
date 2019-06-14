@@ -2,6 +2,10 @@ import os
 import datetime
 import logging
 import json
+
+from netaddr import IPNetwork, IPAddress
+from netaddr.core import AddrConversionError, AddrFormatError
+
 from dateutil.parser import parse
 from pytz import timezone
 from typing import NamedTuple, Optional, Collection, FrozenSet, List, Set
@@ -10,7 +14,10 @@ from tzlocal import get_localzone
 from email_router.email_router_config_source import EmailRouterDatastoreSourceType, EmailRouterSourceConfig
 from email_router.email_router_destination import EmailRouterDestinationType, EmailRouterDestinationConfig
 from email_router.router_instance_type import RouterInstanceType
-from error import EmeraldEmailRouterDatabaseInitializationError, EmeraldEmailRouterDuplicateTargetError
+from error import EmeraldEmailRouterDatabaseInitializationError, \
+    EmeraldEmailRouterDuplicateTargetError, \
+    EmeraldEmailRouterMatchNotFoundError, \
+    EmeraldEmailRouterConfigNotActiveError
 
 
 class EmailRouterRuleMatchPattern(NamedTuple):
@@ -20,6 +27,7 @@ class EmailRouterRuleMatchPattern(NamedTuple):
     attachment_included: Optional[bool] = None
     body_size_minimum: Optional[int] = None
     body_size_maximum: Optional[int] = None
+    sender_ip_whitelist: Optional[FrozenSet[str]] = None
 
     # set the hash and str methods so we can use these in sets
     def __str__(self):
@@ -30,7 +38,9 @@ class EmailRouterRuleMatchPattern(NamedTuple):
                    'recipient_name=' + str(self.recipient_name),
                    'attachment_included=' + str(self.attachment_included),
                    'body_size_minimum=' + str(self.body_size_minimum),
-                   'body_size_maximum=' + str(self.body_size_maximum)
+                   'body_size_maximum=' + str(self.body_size_maximum),
+                   'sender_ip_set=' +
+                   ','.join([str(x) for x in self.sender_ip_whitelist] if self.sender_ip_whitelist is not None else '')
                ])
 
     def __hash__(self):
@@ -46,7 +56,8 @@ class EmailRouterRuleMatchPattern(NamedTuple):
                 self.recipient_name == other.recipient_name and
                 self.attachment_included == other.attachment_included and
                 self.body_size_minimum == other.body_size_minimum and
-                self.body_size_maximum == other.body_size_maximum
+                self.body_size_maximum == other.body_size_maximum and
+                sorted([self.sender_ip_whitelist]) == sorted([other.sender_ip_whitelist])
         )
 
     def __ne__(self, other):
@@ -134,6 +145,11 @@ class EmailRouterTargetConfig(NamedTuple):
             ' with identical priority value "' + str(self.target_priority) + '" - not supported'
         )
 
+# use this to tell caller what to do based on the matched rules
+class EmailRouterMatchResult(NamedTuple):
+    matched_info_log: List[str]
+    matched_target_name: str
+    matched_destinations: List[EmailRouterDestinationConfig]
 
 class EmailRouterRulesDatastore:
     @property
@@ -152,6 +168,38 @@ class EmailRouterRulesDatastore:
     def instance_type(self) -> RouterInstanceType:
         return self._instance_type
 
+    @property
+    def router_rules_datastore_initialized(self) -> bool:
+        return self._router_rules_datastore_initialized
+
+    @property
+    def target_count(self) -> int:
+        return len(self._router_config_by_target)
+
+    # TODO: just use csv toolkit and return as csv with column headers
+    @property
+    def targets_info_as_list_with_header(self) -> List[str]:
+        return_data: List[str] = list()
+        return_data.append(['Priority', 'Target Name'])
+        for this_target in sorted(self._router_config_by_target):
+            return_data.append([str(this_target.target_priority), this_target.target_name])
+        return return_data
+
+    @property
+    def targets_info_as_table(self) -> List[str]:
+        return_data: List[str] = list()
+        return_data.append('Priority' + '  ' + 'Target Name')
+        for this_target in sorted(self._router_config_by_target):
+            return_data.append('{:05.3f}'.format(this_target.target_priority) + '{:5s}'.format('') +
+                               '{:20s}'.format(this_target.target_name))
+        return return_data
+
+    @router_rules_datastore_initialized.setter
+    def router_rules_datastore_initialized(self, value):
+        if type(value) is not bool:
+            raise TypeError('Cannot initialize router_rules_datastore_initialized to an object of type "' +
+                            type(value).__name__ + '" - this is a boolean')
+
     def __init__(self,
                  name: str,
                  revision_datetime: datetime.datetime,
@@ -161,6 +209,8 @@ class EmailRouterRulesDatastore:
         self._revision_datetime = revision_datetime
         self._revision_number = revision_number
         self._instance_type = instance_type
+
+        self._router_rules_datastore_initialized = False
 
         # create the dictionary that will store rules by target name
         #  its members will have collections of sortable (prioritized) router rules and destinations
@@ -197,6 +247,29 @@ class EmailRouterRulesDatastore:
 
         # now add to the collection
         self._router_config_by_target.add(target_config)
+
+    def match_inbound_email(self,
+                            address_to_collection: Collection[str],
+                            address_from: str,
+                            sender_ip: str) -> EmailRouterMatchResult:
+
+        if not self._router_rules_datastore_initialized:
+            raise EmeraldEmailRouterConfigNotActiveError('Router match table is not active - current configuration ' +
+                                                         'entry count: ' +
+                                                         str(self._router_rules_datastore.target_count))
+        matched_info_log: List[str] = list()
+
+        # now sort the router match table by target first (based on target priority) and then on rules
+        #  the first match "wins"
+        match_found = False
+        for this_target in sorted(self._router_config_by_target, key=float):
+            matched_info_log.append('Evaluating match for target "' + this_target.target_name + '" at priority ' +
+                             str(this_target.target_priority) + os.linesep)
+
+        if not match_found:
+            raise EmeraldEmailRouterMatchNotFoundError('Unable to find match for target email request')
+
+
 
 class EmailRouter:
     @property
@@ -524,6 +597,45 @@ class EmailRouter:
                     body_size_minimum = this_rule['body_size_minimum'] if 'body_size_minimum' in this_rule else None
                     body_size_maximum = this_rule['body_size_maximum'] if 'body_size_maximum' in this_rule else None
 
+                    # initialize the ip whitelisting which will arrive as an (optional) comma separated list of CIDRs
+                    sender_ip_whitelist_csv = this_rule['sender_ip_whitelist'] \
+                        if 'sender_ip_whitelist' in this_rule and len(this_rule['sender_ip_whitelist']) > 0 \
+                        else None
+                    sender_ip_whitelist_set = None
+                    # now if present, split on comma and parse the values
+                    if sender_ip_whitelist_csv is not None:
+                        sender_ip_whitelist_set = set()
+                        for this_ip_count, this_ip_entry in enumerate(sender_ip_whitelist_csv.split(','), start=1):
+                            self.logger.debug('Testing entry #' + str(this_ip_count) + ' IP whitelist - value = ' +
+                                              str(this_ip_entry))
+                            # now attempt to convert this entry into an IP network (i.e. CIDR)
+                            try:
+                                this_entry_as_ip_network = IPNetwork(this_ip_entry)
+                            except AddrFormatError as afex:
+                                if rule_match_priority not in rules_parse_error_log:
+                                    rules_parse_error_log[rule_match_priority] = list()
+                                rules_parse_error_log[rule_match_priority].append(
+                                    'Unable to parse entry #' + str(this_ip_count) + ' (value ' +
+                                    str(this_ip_entry) + ') as an IP network (for whitelist)' + os.linesep +
+                                    'Exception detail: ' + str(afex.args[0])
+                                )
+                                # loop through all so we parse every error we can
+                                continue
+
+                            # ok we have a valid entry so add
+                            sender_ip_whitelist_set.add(this_entry_as_ip_network)
+
+                        # sanity check - if this entry specified, there needs to be at least one valid ip network now
+                        if len(sender_ip_whitelist_set) == 0:
+                            if rule_match_priority not in rules_parse_error_log:
+                                rules_parse_error_log[rule_match_priority] = list()
+                            rules_parse_error_log[rule_match_priority].append(
+                                'sender_ip_whitelist field specified but no valid IP networks were found' +
+                                os.linesep + 'Value provided = ' + str(sender_ip_whitelist_csv)
+                            )
+
+
+
                     # if neither domain nor sender nor recipient specified, abort
                     if sender_domain is None and sender_name is None and recipient_name is None:
                         if rule_match_priority not in rules_parse_error_log:
@@ -531,7 +643,6 @@ class EmailRouter:
                         rules_parse_error_log[rule_match_priority].append(
                             'No sender domain, sender name or recipient pattern specified - at least one required'
                         )
-                        continue
 
                     if body_size_minimum is not None and (type(body_size_minimum) is not int or body_size_minimum < 0):
                         if rule_match_priority not in rules_parse_error_log:
@@ -540,7 +651,6 @@ class EmailRouter:
                             'body_size_minimum if specified must be a nonnegative integer (type given = ' +
                             type(body_size_minimum).__name__ + ')'
                         )
-                        continue
 
                     if body_size_maximum is not None and (type(body_size_maximum) is not int or body_size_maximum < 0):
                         if rule_match_priority not in rules_parse_error_log:
@@ -549,7 +659,6 @@ class EmailRouter:
                             'body_size_maximum if specified must be a nonnegative integer (type given = ' +
                             type(body_size_maximum).__name__ + ')'
                         )
-                        continue
 
                     if attachment_included is not None and type(attachment_included) is not bool:
                         if rule_match_priority not in rules_parse_error_log:
@@ -558,9 +667,18 @@ class EmailRouter:
                             'attachment_included must be a boolean if present (type given = ' +
                             type(attachment_included).__name__ + ')'
                         )
-                        continue
 
                     # ok now we can initialize our rule
+                    this_rule_error_count = len(rules_parse_error_log[rule_match_priority]) \
+                        if rule_match_priority in rules_parse_error_log else 0
+                    if this_rule_error_count > 0:
+                        rules_parse_error_log[rule_match_priority].append(
+                            'Skipping creation of rule match pattern for priority ' + str(rule_match_priority) +
+                            ' with error count of ' + str(this_rule_error_count)
+                        )
+                        continue
+
+                    # getting here means we will create a rule for this
                     this_rule_match_pattern = EmailRouterRuleMatchPattern(
                         sender_domain=sender_domain,
                         sender_name=sender_name,
@@ -636,4 +754,9 @@ class EmailRouter:
                 self.logger.info('Completed initialization of rules configuration for target config ' + tc_name)
 
         # getting here means success
-        self._router_db_initialized = True
+        self.logger.warning('Activating router rules configuration with target count ' +
+                            str(self._router_rules_datastore.target_count) +
+                            os.linesep + 'Target(s): ' + os.linesep + '\t' +
+                            (os.linesep + '\t').join(self._router_rules_datastore.targets_info_as_table))
+
+        self._router_rules_datastore.router_rules_datastore_initialized = True
