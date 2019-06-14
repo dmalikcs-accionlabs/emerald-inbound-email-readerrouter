@@ -1,1 +1,2 @@
 include reference/*.txt
+include reference/*.json

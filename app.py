@@ -4,6 +4,7 @@ import argparse
 import logging
 import pkg_resources
 
+from error import EmeraldEmailRouterDatabaseInitializationError
 from exitcode import ExitCode
 from version import __version__
 from email_router import EmailRouterDatabaseSourceType, EmailRouter, EmailRouterSourceIdentifier
@@ -49,6 +50,10 @@ def emerald_inbound_email_readerrouter_launcher(argv):
                         type=str,
                         help='Specify instance type (defines location, data class, etc. - see devops docs)' +
                         os.linesep + 'Must be one of following: ' + ','.join([x.name for x in RouterInstanceType])),
+    parser.add_argument('--router_db_source_file',
+                        type=str,
+                        help='Specify to include a JSON file that contains the email router database' +
+                        os.linesep + 'Other methods may be supported')
     parser.add_argument('--host',
                         type=str,
                         action='store',
@@ -92,10 +97,21 @@ def emerald_inbound_email_readerrouter_launcher(argv):
                         os.linesep + '\tMust be one of: ' + ','.join([x.name for x in RouterInstanceType]))
         return ExitCode.ARGUMENT_ERROR
 
-    router_source_identifier = EmailRouterSourceIdentifier(
-        source_type=EmailRouterDatabaseSourceType.JSONFILE,
-        source_uri='my source'
-    )
+    router_source_identifier = None
+    if args.router_db_source_file is not None and len(args.router_db_source_file) > 0:
+        # this means we assume our initialization will come from JSON file first
+        logger.info('Add read of JSON file here')
+
+        router_source_identifier = EmailRouterSourceIdentifier(
+            source_type=EmailRouterDatabaseSourceType.JSONFILE,
+            source_uri=args.router_db_source_file
+        )
+
+    # at this point fail if no source provided
+    if router_source_identifier is None:
+        logger.critical('Initialization error: no valid router initialization source provided' +
+                        os.linesep + 'Specify with file using --router_db_source_file')
+        return ExitCode.ARGUMENT_ERROR
 
     # log key provided arguments
     logger.info('Command line arguments: ' + os.linesep + '\t' +
@@ -103,7 +119,12 @@ def emerald_inbound_email_readerrouter_launcher(argv):
 
     try:
         test = EmailRouter(router_db_source_identifier=router_source_identifier,
-                           router_instance_type=router_instance_type)
+                           router_instance_type=router_instance_type,
+                           debug=args.debug)
+    except EmeraldEmailRouterDatabaseInitializationError as eex:
+        logger.critical('Unable to initialize ' + appname + ': email router initialization error' +
+                        os.linesep + 'Router database initialization error: ' + eex.message)
+        return ExitCode.INITIALIZATION_ERROR
     except ValueError as vex:
         logger.critical('Unable to initialize ' + appname + ': email router initialization error' +
                         os.linesep + 'Exception: ' + str(vex.args[0]))

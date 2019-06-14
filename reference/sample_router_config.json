@@ -1,0 +1,24 @@
+{
+	"name": "Email Router Rules",
+	"revision": 1,
+	"date": "2019-06-13",
+	"instance_types": [{
+		"blue": {
+			"match_rules": [{
+				"seq": 1,
+				"from_domain": "bseglobal\\.net",
+				"from_sender": "",
+				"attachment_included": true,
+				"body_size_minimum": 10000
+			}],
+          "destination_uri": "direct_processing"
+		},
+		"green": {
+			"match_rules": [{
+				"seq": 1,
+				"from_domain": "cottonfields\\.us"
+			}],
+          "destination_uri": "direct_processing"
+		}
+	}]
+}

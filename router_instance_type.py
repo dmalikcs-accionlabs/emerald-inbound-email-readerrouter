@@ -4,12 +4,12 @@ from enum import Enum, unique
 
 
 class RouterInstanceTypeConfig(NamedTuple):
-    name: str
+    instance_type_name: str
     url_prefix: str
 
     def _str__(self):
         return ','.join([
-            'name=' + self.name,
+            'instance_type_name=' + self.instance_type_name,
             'url_prefix=' + self.url_prefix
         ])
 
@@ -20,7 +20,7 @@ class RouterInstanceTypeConfig(NamedTuple):
         if not isinstance(other, RouterInstanceTypeConfig):
             return False
 
-        if self.name != other.name:
+        if self.instance_type_name != other.instance_type_name:
             return False
 
         if self.url_prefix != other.url_prefix:
@@ -35,9 +35,9 @@ class RouterInstanceTypeConfig(NamedTuple):
         if not isinstance(other, RouterInstanceTypeConfig):
             raise TypeError('Cannot compare value of type "' + str(type(other)) +
                             ' to ' + RouterInstanceTypeConfig.__name__)
-        if self.name < other.name:
+        if self.instance_type_name < other.instance_type_name:
             return True
-        elif self.name > other.name:
+        elif self.instance_type_name > other.instance_type_name:
             return False
 
         if self.url_prefix < other.url_prefix:
@@ -51,9 +51,9 @@ class RouterInstanceTypeConfig(NamedTuple):
         if not isinstance(other, RouterInstanceTypeConfig):
             raise TypeError('Cannot compare value of type "' + str(type(other)) +
                             ' to ' + RouterInstanceTypeConfig.__name__)
-        if self.name > other.name:
+        if self.instance_type_name > other.instance_type_name:
             return True
-        elif self.name < other.name:
+        elif self.instance_type_name < other.instance_type_name:
             return False
 
         if self.url_prefix > other.url_prefix:
@@ -72,9 +72,9 @@ class RouterInstanceTypeConfig(NamedTuple):
 
 @unique
 class RouterInstanceType(Enum):
-    BLUE = RouterInstanceTypeConfig(name='blue',
+    BLUE = RouterInstanceTypeConfig(instance_type_name='blue',
                                     url_prefix='blue')
-    GREEN = RouterInstanceTypeConfig(name='green',
+    GREEN = RouterInstanceTypeConfig(instance_type_name='green',
                                      url_prefix='green')
 
     def __str__(self):
