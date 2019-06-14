@@ -11,9 +11,13 @@ from email_router.email_router_config_source import \
     EmailRouterDatastoreSourceType, EmailRouterSourceConfig
 from email_router.email_router_datastore import EmailRouter
 from email_router.router_instance_type import RouterInstanceType
+from email_router.email_router_datastore import EmailRouterMatchResultCollection
+from flask import Flask, request, render_template
+
 APP_NAME = 'EMERALD INBOUND EMAIL READER ROUTER'
-MIN_PYTHON_VER_MAJOR=3
-MIN_PYTHON_VER_MINOR=6
+MIN_PYTHON_VER_MAJOR = 3
+MIN_PYTHON_VER_MINOR = 6
+
 
 def get_command_info_as_string() -> str:
     the_package = __name__
@@ -48,14 +52,15 @@ def emerald_inbound_email_readerrouter_launcher(argv):
     # see comment below about using complex types in argparse
     parser.add_argument('--router_instance_type',
                         required=True,
-#                        type=RouterInstanceType.from_string,
+                        #                        type=RouterInstanceType.from_string,
                         type=str,
                         help='Specify instance type (defines location, data class, etc. - see devops docs)' +
-                        os.linesep + 'Must be one of following: ' + ','.join([x.name for x in RouterInstanceType])),
+                             os.linesep + 'Must be one of following: ' + ','.join(
+                            [x.name for x in RouterInstanceType])),
     parser.add_argument('--router_db_source_file',
                         type=str,
                         help='Specify to include a JSON file that contains the email router database' +
-                        os.linesep + 'Other methods may be supported')
+                             os.linesep + 'Other methods may be supported')
     parser.add_argument('--host',
                         type=str,
                         action='store',
@@ -117,12 +122,12 @@ def emerald_inbound_email_readerrouter_launcher(argv):
 
     # log key provided arguments
     logger.info('Command line arguments: ' + os.linesep + '\t' +
-                (os.linesep + '\t').join([k + ': ' + str(v) for k,v in sorted(vars(args).items())]))
+                (os.linesep + '\t').join([k + ': ' + str(v) for k, v in sorted(vars(args).items())]))
 
     try:
-        test = EmailRouter(router_db_source_identifier=router_source_identifier,
-                           router_instance_type=router_instance_type,
-                           debug=args.debug)
+        email_router = EmailRouter(router_db_source_identifier=router_source_identifier,
+                                   router_instance_type=router_instance_type,
+                                   debug=args.debug)
     except EmeraldEmailRouterDatabaseInitializationError as eex:
         logger.critical('Unable to initialize ' + appname + ': email router initialization error' +
                         os.linesep + 'Router database initialization error: ' + eex.message)
@@ -132,9 +137,49 @@ def emerald_inbound_email_readerrouter_launcher(argv):
                         os.linesep + 'Exception: ' + str(vex.args[0]))
         return ExitCode.ARGUMENT_ERROR
 
+
+    # now start the app
+    logger.warning('Initializing ' + APP_NAME + ' Version ' + __version__)
+
+    app = Flask(__name__)
+
+    @app.route('/', methods=['GET'])
+    def index():
+        """Show index page to confirm that server is running."""
+        return render_template('index.html')
+
+    @app.route('/inbound/' + router_instance_type.name.lower() + '/', methods=['POST'])
+    def inbound_parse():
+        """Process POST from Inbound Parse and print received data."""
+        data = request.get_data(as_text=True)
+        print(str(data))
+        # Tell SendGrid's Inbound Parse to stop sending POSTs
+        # Everything is 200 OK :)
+        return "OK"
+
+    logger.warning('Starting app using host=' + args.host + ' and port=' + str(args.port))
+    app.run(debug=args.debug,
+            host=args.host,
+            port=args.port)
+
     return ExitCode.SUCCESS
+
+def make_test_entry(email_router: EmailRouter):
+    # now make a test entry
+    match_result_set = \
+        email_router.match_inbound_email(address_to_collection=['hello@my.com', 'bse@blue.ingestion.'],
+                                         address_from='william@bseglobal.net',
+                                         sender_ip='9.0.1.1')
+    for result_count,this_result in enumerate(match_result_set.matched_target_results, start=1):
+        print('Result #' + str(result_count) + ': ' + 'Target ' + str(this_result.matched_target_name) +
+              os.linesep + 'Destinations: ' + os.linesep + '\t' +
+              (os.linesep + '\t').join([str(x) for x in this_result.destinations]))
+
+
+    print(os.linesep + 'The result set log ' + os.linesep +
+          os.linesep.join(match_result_set.matched_info_log) + os.linesep)
+
 
 if __name__ == '__main__':
     retcode = emerald_inbound_email_readerrouter_launcher(sys.argv[0:])
     sys.exit(retcode)
-

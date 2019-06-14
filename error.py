@@ -57,3 +57,6 @@ class EmeraldEmailRouterMatchNotFoundError(EmeraldError):
 
 class EmeraldEmailRouterConfigNotActiveError(EmeraldError):
     pass
+
+class EmeraldEmailRouterInputDataError(EmeraldError):
+    pass
