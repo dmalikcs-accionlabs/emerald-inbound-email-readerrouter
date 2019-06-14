@@ -4,25 +4,13 @@ import logging
 import json
 from dateutil.parser import parse
 from pytz import timezone
-from enum import Enum, unique, auto
-from typing import NamedTuple, Optional, FrozenSet
+from typing import NamedTuple, Optional, Collection, FrozenSet, List
 from tzlocal import get_localzone
 
-from router_instance_type import RouterInstanceType, RouterInstanceTypeConfig
+from email_router.email_router_config_source import EmailRouterDatastoreSourceType, EmailRouterSourceConfig
+from email_router.email_router_destination import EmailRouterDestinationType, EmailRouterDestinationConfig
+from email_router.router_instance_type import RouterInstanceType
 from error import EmeraldEmailRouterDatabaseInitializationError
-
-
-@unique
-class EmailRouterDatabaseSourceType(Enum):
-    JSONFILE = auto()
-    UNSUPPORTED = auto()
-
-
-class EmailRouterSourceIdentifier(NamedTuple):
-    source_type: EmailRouterDatabaseSourceType
-    source_uri: str
-    source_username_or_access_key: Optional[str] = None
-    source_password_or_secret_key: Optional[str] = None
 
 
 class EmailRouterRuleMatchPattern(NamedTuple):
@@ -33,17 +21,49 @@ class EmailRouterRuleMatchPattern(NamedTuple):
     body_size_minimum: Optional[int] = None
     body_size_maximum: Optional[int] = None
 
+    def __eq__(self, other):
+        if not isinstance(other, EmailRouterRuleMatchPattern):
+            return False
 
-@unique
-class EmailRouterRuleDestinationType(Enum):
-    DIRECT_PROCESSING = auto()
+        return (
+                self.sender_domain == other.sender_domain and
+                self.sender_name == other.sender_name and
+                self.recipient_name == other.recipient_name and
+                self.attachment_included == other.attachment_included and
+                self.body_size_minimum == other.body_size_minimum and
+                self.body_size_maximum == other.body_size_maximum
+        )
+
+    def __ne__(self, other):
+        return not (__eq__(self, other))
 
 
+# router rules are sorted only by sequence - rules with identical sequence have indeterminate sort order
 class EmailRouterRule(NamedTuple):
     sequence: float
     match_pattern: EmailRouterRuleMatchPattern
-    destination_type: EmailRouterRuleDestinationType = EmailRouterRuleDestinationType.DIRECT_PROCESSING
-    destination_uri: Optional[str] = None
+
+    def __lt__(self, other):
+        if not isinstance(other, EmailRouterRule):
+            raise TypeError('Unable to compare object of type ' + type(other).__name__ + ' to ' +
+                            EmailRouterRule.__name__)
+
+        if self.sequence < other.sequence:
+            return True
+        elif self.sequence > other.sequence:
+            return False
+
+        # really indeterminate results - not guaranteed to be idempotent -
+        # since we don't allow same seq diff rules this will never happen
+        raise NotImplementedError(
+            'Comparison found on two members of ' + EmailRouterRule.__name__ +
+            ' with identical sequence value "' + str(self.sequence) + '" - not supported')
+
+
+class EmailRouterTargetConfig(NamedTuple):
+    target_name: str
+    router_rules: FrozenSet[EmailRouterRule]
+    destinations: FrozenSet[EmailRouterDestinationConfig]
 
 
 class EmailRouterRulesDatastore:
@@ -73,6 +93,16 @@ class EmailRouterRulesDatastore:
         self._revision_number = revision_number
         self._instance_type = instance_type
 
+        # create the dictionary that will store rules by target name
+        #  its members will have collections of sortable (prioritized) router rules and destinations
+        self._router_config_by_target = None
+
+    def add_target_routing_config(self,
+                                  target_name: str,
+                                  router_rule_collection: Collection[EmailRouterRule],
+                                  destination_config_collection: Collection[EmailRouterDestinationConfig]):
+        pass
+
 
 class EmailRouter:
     @property
@@ -96,37 +126,33 @@ class EmailRouter:
         return self._router_instance_type
 
     @property
-    def router_db_source_identifier(self) -> EmailRouterSourceIdentifier:
+    def router_db_source_identifier(self) -> EmailRouterSourceConfig:
         return self._router_db_source_identifier
-
-    @classmethod
-    def get_required_format_datetime(self) -> str:
-        return '%Y-%m-%dT%H:%M:%S %Z'
 
     @classmethod
     def get_supported_router_db_source_types(cls):
         return frozenset([
-            EmailRouterDatabaseSourceType.JSONFILE
+            EmailRouterDatastoreSourceType.JSONFILE
         ])
 
     def __init__(self,
-                 router_db_source_identifier: EmailRouterSourceIdentifier,
+                 router_db_source_identifier: EmailRouterSourceConfig,
                  router_instance_type: RouterInstanceType,
                  debug: bool = False):
 
-        if not isinstance(router_db_source_identifier, EmailRouterSourceIdentifier):
+        if not isinstance(router_db_source_identifier, EmailRouterSourceConfig):
             raise ValueError('Cannot initialize ' + type(self).__name__ + ': ' +
                              'router_db_source_identifier must be of type ' +
-                             EmailRouterSourceIdentifier.__name__ + os.linesep +
+                             EmailRouterSourceConfig.__name__ + os.linesep +
                              'Value provided had type "' + str(type(router_db_source_identifier)))
 
         # now verify the source type and make sure it is supported
-        if not issubclass(type(router_db_source_identifier.source_type), EmailRouterDatabaseSourceType):
+        if not issubclass(type(router_db_source_identifier.source_type), EmailRouterDatastoreSourceType):
             raise ValueError('Cannot initialize ' + type(self).__name__ + ': ' +
                              'source_type from router_db_source_identifier must be of type "' +
-                             EmailRouterDatabaseSourceType.__name__ +
+                             EmailRouterDatastoreSourceType.__name__ +
                              '" and have one of these values: ' +
-                             ','.join([k.name for k in EmailRouterDatabaseSourceType]))
+                             ','.join([k.name for k in EmailRouterDatastoreSourceType]))
         if router_db_source_identifier.source_type not in type(self).get_supported_router_db_source_types():
             raise ValueError('Unsupported router db source type "' + str(router_db_source_identifier.source_type) +
                              os.linesep + 'Supported value(s): ' +
@@ -158,7 +184,7 @@ class EmailRouter:
         self._router_db_initialized = False
         self._router_rules_datastore = None
 
-        if self.router_db_source_identifier.source_type == EmailRouterDatabaseSourceType.JSONFILE:
+        if self.router_db_source_identifier.source_type == EmailRouterDatastoreSourceType.JSONFILE:
             self._initialize_from_jsonfile()
         else:
             raise \
@@ -274,8 +300,9 @@ class EmailRouter:
             local_timezone_zone_string = get_localzone().zone
             router_db_revision_datetime_as_utc = \
                 timezone(local_timezone_zone_string).localize(router_db_revision_datetime)
-        except ValueError as vex:
+        except ValueError:
             # not naive so scale
+            self.logger.debug('Provided timestamp includes timezone so scaling to UTC')
             router_db_revision_datetime_as_utc = router_db_revision_datetime.astimezone(timezone('UTC'))
         else:
             self.logger.info('Naive timezone')
@@ -353,19 +380,29 @@ class EmailRouter:
                         '" contains no actual rules.  Aborting'
                     )
 
-                rules_parse_result = dict()
+                rules_parse_error_log = dict()
+                # accumulate all the rules in the source datastore and then we will write into config if all valid
+                rules_for_target: List[EmailRouterRule] = list()
+
                 for rule_count, this_rule in enumerate(tc_router_rules['match_rules'], start=1):
                     self.logger.info('Checking rule "' + str(this_rule) + '"')
 
                     try:
                         rule_seq = float(this_rule['seq'])
-                    except KeyError as kex:
+                    except KeyError:
                         raise EmeraldEmailRouterDatabaseInitializationError('Parameter "seq" not found in rule #' +
                                                                             str(rule_count) + ' - aborting')
 
-                    sender_domain = this_rule['sender_domain'] if 'sender_domain' in this_rule else None
-                    sender_name = this_rule['sender_name'] if 'sender_name' in this_rule else None
-                    recipient_name = this_rule['recipient_name'] if 'recipient_name' in this_rule else None
+                    # initialize our text based fields, noting we treat empty strings as nulls
+                    sender_domain = this_rule['sender_domain'] \
+                        if ('sender_domain' in this_rule and len(this_rule['sender_domain']) > 0) \
+                        else None
+                    sender_name = this_rule['sender_name'] \
+                        if ('sender_name' in this_rule and len(this_rule['sender_name']) > 0) \
+                        else None
+                    recipient_name = this_rule['recipient_name'] \
+                        if ('recipient_name' in this_rule and len(this_rule['recipient_name'])) \
+                        else None
                     attachment_included = this_rule['attachment_included'] \
                         if 'attachment_included' in this_rule else None
                     body_size_minimum = this_rule['body_size_minimum'] if 'body_size_minimum' in this_rule else None
@@ -373,65 +410,107 @@ class EmailRouter:
 
                     # if neither domain nor sender nor recipient specified, abort
                     if sender_domain is None and sender_name is None and recipient_name is None:
-                        if rule_seq not in rules_parse_result:
-                            rules_parse_result[rule_seq] = list()
-                        rules_parse_result[rule_seq].append(
+                        if rule_seq not in rules_parse_error_log:
+                            rules_parse_error_log[rule_seq] = list()
+                        rules_parse_error_log[rule_seq].append(
                             'No sender domain, sender name or recipient pattern specified - at least one required'
                         )
                         continue
 
                     if body_size_minimum is not None and (type(body_size_minimum) is not int or body_size_minimum < 0):
-                        if rule_seq not in rules_parse_result:
-                            rules_parse_result[rule_seq] = list()
-                        rules_parse_result[rule_seq].append(
+                        if rule_seq not in rules_parse_error_log:
+                            rules_parse_error_log[rule_seq] = list()
+                        rules_parse_error_log[rule_seq].append(
                             'body_size_minimum if specified must be a nonnegative integer (type given = ' +
                             type(body_size_minimum).__name__ + ')'
                         )
                         continue
 
                     if body_size_maximum is not None and (type(body_size_maximum) is not int or body_size_maximum < 0):
-                        if rule_seq not in rules_parse_result:
-                            rules_parse_result[rule_seq] = list()
-                        rules_parse_result[rule_seq].append(
+                        if rule_seq not in rules_parse_error_log:
+                            rules_parse_error_log[rule_seq] = list()
+                        rules_parse_error_log[rule_seq].append(
                             'body_size_maximum if specified must be a nonnegative integer (type given = ' +
                             type(body_size_maximum).__name__ + ')'
                         )
                         continue
 
                     if attachment_included is not None and type(attachment_included) is not bool:
-                        if rule_seq not in rules_parse_result:
-                            rules_parse_result[rule_seq] = list()
-                        rules_parse_result[rule_seq].append(
+                        if rule_seq not in rules_parse_error_log:
+                            rules_parse_error_log[rule_seq] = list()
+                        rules_parse_error_log[rule_seq].append(
                             'attachment_included must be a boolean if present (type given = ' +
                             type(attachment_included).__name__ + ')'
                         )
                         continue
 
-                if len(rules_parse_result) > 0:
-                    error_data = []
+                    # ok now we can initialize our rule
+                    this_rule_match_pattern = EmailRouterRuleMatchPattern(
+                        sender_domain=sender_domain,
+                        sender_name=sender_name,
+                        recipient_name=recipient_name,
+                        attachment_included=attachment_included,
+                        body_size_maximum=body_size_maximum,
+                        body_size_minimum=body_size_minimum
+                    )
+                    # now incorporate the sequence so we can prioritize
+                    rules_for_target.append(
+                        EmailRouterRule(
+                            match_pattern=this_rule_match_pattern,
+                            sequence=rule_seq
+                        )
+                    )
+
+                if len(rules_parse_error_log) > 0:
+                    error_data = list()
                     error_data.append('Unable to initialize - rule(s) had following errors: ')
-                    for rule_seq in rules_parse_result:
+                    for rule_seq in rules_parse_error_log:
                         error_data.append('Rule seq ' + str(rule_seq) + os.linesep + '\t' +
-                                          (os.linesep + '\t').join([x for x in rules_parse_result[rule_seq]]))
+                                          (os.linesep + '\t').join([x for x in rules_parse_error_log[rule_seq]]))
                     raise EmeraldEmailRouterDatabaseInitializationError(os.linesep.join(error_data) + os.linesep)
 
-                # ok now we can initialize our rule
-                this_rule_match_pattern = EmailRouterRuleMatchPattern(
-                    sender_domain=sender_domain,
-                    sender_name=sender_name,
-                    recipient_name=recipient_name,
-                    attachment_included=attachment_included,
-                    body_size_maximum=body_size_maximum,
-                    body_size_minimum= body_size_minimum
-                )
+                # at this point we can trust our rules_for_target collection and will shortly add to configuration
+                #  first we need to validate the destination
+                self.logger.info('Validated rules collection (count=' + str(len(rules_for_target)) +
+                                 ') for target ' + tc_name)
 
                 #
                 #  Next make sure the destination works - we only support a limited number of options
                 #  We have already done null checking for this required parameter
-                destination = tc_router_rules['destination']
-                destination_uri = tc_router_rules['destination_uri'] if 'destination_uri' in tc_router_rules else None
+                destination_as_string = tc_router_rules['destination']
+                if len(destination_as_string) == 0:
+                    raise EmeraldEmailRouterDatabaseInitializationError(
+                        'Unable to initialize - destination for target config "' + tc_name + '" is null - check JSON'
+                    )
+                try:
+                    destination = EmailRouterDestinationType[destination_as_string.upper()]
+                except KeyError:
+                    raise EmeraldEmailRouterDatabaseInitializationError(
+                        'Unable to initialize - destination for target config "' + tc_name + '" is not valid' +
+                        os.linesep + 'Value provided = ' + destination_as_string +
+                        os.linesep +
+                        'Must be one of following: ' + ','.join([x.name for x in EmailRouterDestinationType])
+                    )
 
-                self.logger.warn('CODE IN PROGRESS UPDATE - add final routing rules entry for ' + tc_name)
+                destination_uri = tc_router_rules['destination_uri'] \
+                    if 'destination_uri' in tc_router_rules and len(tc_router_rules['destination_uri']) > 0 \
+                    else None
+
+                self.logger.info('Validated destination for target config + ' + tc_name)
+
+                # now make a rules entry for the specified tc_name (target)
+                #  FIXME - noting that JSON only supports one destination per target config right now, but
+                #  rules database will support multiple ones.  Hard-coding sequence now
+                self.router_rules_datastore.add_target_routing_config(
+                    target_name=tc_name,
+                    router_rule_collection=rules_for_target,
+                    destination_config_collection=[
+                        EmailRouterDestinationConfig(destination_sequence=10,
+                                                     destination_type=destination,
+                                                     destination_uri=destination_uri)]
+                )
+
+            self.logger.info('Completed initialization of rules configuration for target config ' + tc_name)
 
         # getting here means success
         self._router_db_initialized = True

@@ -7,8 +7,10 @@ import pkg_resources
 from error import EmeraldEmailRouterDatabaseInitializationError
 from exitcode import ExitCode
 from version import __version__
-from email_router import EmailRouterDatabaseSourceType, EmailRouter, EmailRouterSourceIdentifier
-from router_instance_type import RouterInstanceType
+from email_router.email_router_config_source import \
+    EmailRouterDatastoreSourceType, EmailRouterSourceConfig
+from email_router.email_router_datastore import EmailRouter
+from email_router.router_instance_type import RouterInstanceType
 APP_NAME = 'EMERALD INBOUND EMAIL READER ROUTER'
 MIN_PYTHON_VER_MAJOR=3
 MIN_PYTHON_VER_MINOR=6
@@ -102,8 +104,8 @@ def emerald_inbound_email_readerrouter_launcher(argv):
         # this means we assume our initialization will come from JSON file first
         logger.info('Add read of JSON file here')
 
-        router_source_identifier = EmailRouterSourceIdentifier(
-            source_type=EmailRouterDatabaseSourceType.JSONFILE,
+        router_source_identifier = EmailRouterSourceConfig(
+            source_type=EmailRouterDatastoreSourceType.JSONFILE,
             source_uri=args.router_db_source_file
         )
 
