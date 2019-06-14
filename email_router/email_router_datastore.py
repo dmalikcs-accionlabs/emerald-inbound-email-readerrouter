@@ -40,7 +40,7 @@ class EmailRouterRuleMatchPattern(NamedTuple):
 
 # router rules are sorted only by sequence - rules with identical sequence have indeterminate sort order
 class EmailRouterRule(NamedTuple):
-    sequence: float
+    match_priority: float
     match_pattern: EmailRouterRuleMatchPattern
 
     def __lt__(self, other):
@@ -48,16 +48,16 @@ class EmailRouterRule(NamedTuple):
             raise TypeError('Unable to compare object of type ' + type(other).__name__ + ' to ' +
                             EmailRouterRule.__name__)
 
-        if self.sequence < other.sequence:
+        if self.match_priority < other.match_priority:
             return True
-        elif self.sequence > other.sequence:
+        elif self.match_priority > other.match_priority:
             return False
 
         # really indeterminate results - not guaranteed to be idempotent -
         # since we don't allow same seq diff rules this will never happen
         raise NotImplementedError(
             'Comparison found on two members of ' + EmailRouterRule.__name__ +
-            ' with identical sequence value "' + str(self.sequence) + '" - not supported')
+            ' with identical priority value "' + str(self.match_priority) + '" - not supported')
 
 
 class EmailRouterTargetConfig(NamedTuple):
@@ -388,10 +388,11 @@ class EmailRouter:
                     self.logger.info('Checking rule "' + str(this_rule) + '"')
 
                     try:
-                        rule_seq = float(this_rule['seq'])
+                        rule_match_priority = float(this_rule['match_priority'])
                     except KeyError:
-                        raise EmeraldEmailRouterDatabaseInitializationError('Parameter "seq" not found in rule #' +
-                                                                            str(rule_count) + ' - aborting')
+                        raise EmeraldEmailRouterDatabaseInitializationError(
+                            'Parameter "match_priority" not found in rule #' +
+                            str(rule_count) + ' - aborting')
 
                     # initialize our text based fields, noting we treat empty strings as nulls
                     sender_domain = this_rule['sender_domain'] \
@@ -410,35 +411,35 @@ class EmailRouter:
 
                     # if neither domain nor sender nor recipient specified, abort
                     if sender_domain is None and sender_name is None and recipient_name is None:
-                        if rule_seq not in rules_parse_error_log:
-                            rules_parse_error_log[rule_seq] = list()
-                        rules_parse_error_log[rule_seq].append(
+                        if rule_match_priority not in rules_parse_error_log:
+                            rules_parse_error_log[rule_match_priority] = list()
+                        rules_parse_error_log[rule_match_priority].append(
                             'No sender domain, sender name or recipient pattern specified - at least one required'
                         )
                         continue
 
                     if body_size_minimum is not None and (type(body_size_minimum) is not int or body_size_minimum < 0):
-                        if rule_seq not in rules_parse_error_log:
-                            rules_parse_error_log[rule_seq] = list()
-                        rules_parse_error_log[rule_seq].append(
+                        if rule_match_priority not in rules_parse_error_log:
+                            rules_parse_error_log[rule_match_priority] = list()
+                        rules_parse_error_log[rule_match_priority].append(
                             'body_size_minimum if specified must be a nonnegative integer (type given = ' +
                             type(body_size_minimum).__name__ + ')'
                         )
                         continue
 
                     if body_size_maximum is not None and (type(body_size_maximum) is not int or body_size_maximum < 0):
-                        if rule_seq not in rules_parse_error_log:
-                            rules_parse_error_log[rule_seq] = list()
-                        rules_parse_error_log[rule_seq].append(
+                        if rule_match_priority not in rules_parse_error_log:
+                            rules_parse_error_log[rule_match_priority] = list()
+                        rules_parse_error_log[rule_match_priority].append(
                             'body_size_maximum if specified must be a nonnegative integer (type given = ' +
                             type(body_size_maximum).__name__ + ')'
                         )
                         continue
 
                     if attachment_included is not None and type(attachment_included) is not bool:
-                        if rule_seq not in rules_parse_error_log:
-                            rules_parse_error_log[rule_seq] = list()
-                        rules_parse_error_log[rule_seq].append(
+                        if rule_match_priority not in rules_parse_error_log:
+                            rules_parse_error_log[rule_match_priority] = list()
+                        rules_parse_error_log[rule_match_priority].append(
                             'attachment_included must be a boolean if present (type given = ' +
                             type(attachment_included).__name__ + ')'
                         )
@@ -457,16 +458,17 @@ class EmailRouter:
                     rules_for_target.append(
                         EmailRouterRule(
                             match_pattern=this_rule_match_pattern,
-                            sequence=rule_seq
+                            sequence=rule_match_priority
                         )
                     )
 
                 if len(rules_parse_error_log) > 0:
                     error_data = list()
                     error_data.append('Unable to initialize - rule(s) had following errors: ')
-                    for rule_seq in rules_parse_error_log:
-                        error_data.append('Rule seq ' + str(rule_seq) + os.linesep + '\t' +
-                                          (os.linesep + '\t').join([x for x in rules_parse_error_log[rule_seq]]))
+                    for rule_match_priority in rules_parse_error_log:
+                        error_data.append('Rule match priority ' + str(rule_match_priority) + os.linesep + '\t' +
+                                          (os.linesep + '\t').join(
+                                              [x for x in rules_parse_error_log[rule_match_priority]]))
                     raise EmeraldEmailRouterDatabaseInitializationError(os.linesep.join(error_data) + os.linesep)
 
                 # at this point we can trust our rules_for_target collection and will shortly add to configuration
