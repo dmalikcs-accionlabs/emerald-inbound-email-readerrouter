@@ -46,6 +46,8 @@ class EmeraldError(RuntimeError, metaclass=ABCMeta):
 class EmeraldEmailRouterDatabaseInitializationError(EmeraldError):
     pass
 
+class EmeraldEmailRouterDuplicateTargetError(EmeraldError):
+    pass
 
 class EmeraldEmailRouterMatchNotFoundError(EmeraldError):
     pass

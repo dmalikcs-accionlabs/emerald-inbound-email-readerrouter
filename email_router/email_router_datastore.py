@@ -4,13 +4,13 @@ import logging
 import json
 from dateutil.parser import parse
 from pytz import timezone
-from typing import NamedTuple, Optional, Collection, FrozenSet, List
+from typing import NamedTuple, Optional, Collection, FrozenSet, List, Set
 from tzlocal import get_localzone
 
 from email_router.email_router_config_source import EmailRouterDatastoreSourceType, EmailRouterSourceConfig
 from email_router.email_router_destination import EmailRouterDestinationType, EmailRouterDestinationConfig
 from email_router.router_instance_type import RouterInstanceType
-from error import EmeraldEmailRouterDatabaseInitializationError
+from error import EmeraldEmailRouterDatabaseInitializationError, EmeraldEmailRouterDuplicateTargetError
 
 
 class EmailRouterRuleMatchPattern(NamedTuple):
@@ -20,6 +20,21 @@ class EmailRouterRuleMatchPattern(NamedTuple):
     attachment_included: Optional[bool] = None
     body_size_minimum: Optional[int] = None
     body_size_maximum: Optional[int] = None
+
+    # set the hash and str methods so we can use these in sets
+    def __str__(self):
+        return EmailRouterRuleMatchPattern.__name__ + os.linesep + \
+               os.linesep.join([
+                   'sender_domain=' + str(self.sender_domain),
+                   'sender_name=' + str(self.sender_name),
+                   'recipient_name=' + str(self.recipient_name),
+                   'attachment_included=' + str(self.attachment_included),
+                   'body_size_minimum=' + str(self.body_size_minimum),
+                   'body_size_maximum=' + str(self.body_size_maximum)
+               ])
+
+    def __hash__(self):
+        return hash(str(self))
 
     def __eq__(self, other):
         if not isinstance(other, EmailRouterRuleMatchPattern):
@@ -43,6 +58,31 @@ class EmailRouterRule(NamedTuple):
     match_priority: float
     match_pattern: EmailRouterRuleMatchPattern
 
+    # define hash and str so we can use in sets
+    def __str__(self):
+        return EmailRouterRule.__name__ + os.linesep + \
+               os.linesep.join([
+                   'match_priority=' + str(self.match_priority),
+                   'match_pattern=' + os.linesep + str(self.match_pattern)
+               ])
+
+    def __hash__(self):
+        return hash(str(self))
+
+    def __eq__(self, other):
+        if not isinstance(other, EmailRouterRule):
+            return False
+
+        if self.match_priority != other.match_priority:
+            return False
+        if self.match_pattern != other.match_pattern:
+            return False
+
+        return True
+
+    def __ne__(self, other):
+        return not (__eq__(self, other))
+
     def __lt__(self, other):
         if not isinstance(other, EmailRouterRule):
             raise TypeError('Unable to compare object of type ' + type(other).__name__ + ' to ' +
@@ -57,13 +97,42 @@ class EmailRouterRule(NamedTuple):
         # since we don't allow same seq diff rules this will never happen
         raise NotImplementedError(
             'Comparison found on two members of ' + EmailRouterRule.__name__ +
-            ' with identical priority value "' + str(self.match_priority) + '" - not supported')
+            ' with identical priority value "' + str(self.match_priority) + '" - not supported'
+        )
 
 
 class EmailRouterTargetConfig(NamedTuple):
     target_name: str
+    target_priority: float
     router_rules: FrozenSet[EmailRouterRule]
     destinations: FrozenSet[EmailRouterDestinationConfig]
+
+    # add the hash and str methods so we can put in (generally immutable) sets
+    def __str__(self):
+        return EmailRouterTargetConfig.__name__ + os.linesep + \
+               os.linesep.join([
+                   'target_name=' + str(self.target_name),
+                   'target_priority=' + str(self.target_priority),
+                   'router_rules=' + os.linesep + str(self.router_rules),
+                   'destinations=' + os.linesep + str(self.destinations)
+               ])
+
+    def __lt__(self, other):
+        if not isinstance(other, EmailRouterTargetConfig):
+            raise TypeError('Unable to compare object of type ' + type(other).__name__ + ' to ' +
+                            EmailRouterTargetConfig.__name__)
+
+        if self.target_priority < other.target_priority:
+            return True
+        elif self.target_priority > other.target_priority:
+            return False
+
+        # really indeterminate results if equal - our collections using these abstractions will not allow
+        #  so it should never happen
+        raise NotImplementedError(
+            'Comparison found on two members of ' + EmailRouterRule.__name__ +
+            ' with identical priority value "' + str(self.target_priority) + '" - not supported'
+        )
 
 
 class EmailRouterRulesDatastore:
@@ -95,14 +164,39 @@ class EmailRouterRulesDatastore:
 
         # create the dictionary that will store rules by target name
         #  its members will have collections of sortable (prioritized) router rules and destinations
-        self._router_config_by_target = None
+        self._router_config_by_target: Set[EmailRouterTargetConfig] = set()
 
     def add_target_routing_config(self,
-                                  target_name: str,
-                                  router_rule_collection: Collection[EmailRouterRule],
-                                  destination_config_collection: Collection[EmailRouterDestinationConfig]):
-        pass
+                                  target_config: EmailRouterTargetConfig):
+        # parse step 1 - make sure the parameter is really a target config
+        if not isinstance(target_config, EmailRouterTargetConfig):
+            raise TypeError('Unable to add target_config (type=' + type(target_config).__name__ +
+                            ') is not of type ' + EmailRouterTargetConfig.__name__)
 
+        # parse step 2 - do not allow multiple target configs that are identical or have identical
+        #  target name
+        if target_config in self._router_config_by_target:
+            # callers will have option of ignoring or letting this halt operation
+            raise EmeraldEmailRouterDuplicateTargetError(
+                'Duplicate target config entry (' + target_config.target_name +
+                ') found in source data - skipping this entry'
+            )
+
+        # parse step 3 - look for conflicting names (i.e. same name, different data) OR equal target priority
+        for this_target in self._router_config_by_target:
+            if target_config.target_name == this_target.target_name:
+                raise EmeraldEmailRouterDatabaseInitializationError(
+                    'Conflicting entry found for target name "' + this_target.target_name + '" - aborting new add' +
+                    os.linesep + 'Duplicate target name with different configuration data'
+                )
+            if target_config.target_priority == this_target.target_priority:
+                raise EmeraldEmailRouterDatabaseInitializationError(
+                    'Conflicting entry found for target name "' + this_target.target_name + '" - aborting new add' +
+                    os.linesep + 'Duplicate target priority - each must be unique for sorting'
+                )
+
+        # now add to the collection
+        self._router_config_by_target.add(target_config)
 
 class EmailRouter:
     @property
@@ -357,7 +451,11 @@ class EmailRouter:
                 self.logger.info('Rules = ' + str(tc_router_rules))
 
                 #  now make sure required elements for instance data are there
-                required_elements = ['match_rules', 'destination']
+                required_elements = [
+                    'match_rules',
+                    'destination',
+                    'target_priority']
+
                 required_but_not_found = []
                 for this_required in required_elements:
                     if this_required not in tc_router_rules:
@@ -370,6 +468,23 @@ class EmailRouter:
                         ','.join([x for x in required_but_not_found])
                     )
                 self.logger.info('Required elements found - parsing rules')
+
+                # target priority specifies which target is examined and handled first, since one inbound email
+                #  may be handled to multiple targets.  The priority CANNOT BE THE SAME for multiple entries
+                #  This will be enforced in the database initialization
+                target_priority_from_json = tc_router_rules['target_priority']
+                try:
+                    target_priority = float(target_priority_from_json)
+                    if target_priority <= 0:
+                        raise ValueError('Negative number not allowed for target_priority')
+                except ValueError as vex:
+                    raise EmeraldEmailRouterDatabaseInitializationError(
+                        'Cannot initialize as target "' + tc_name + '" contains an invalid target_priority value' +
+                        os.linesep + 'Must be a positive number' +
+                        os.linesep + 'Value provided = ' + str(target_priority_from_json) + ' (input type = ' +
+                        type(target_priority_from_json).__name__ + ')' +
+                        os.linesep + 'Exception message: ' + str(vex.args[0])
+                    )
 
                 # match_rules is an list of elements (at least one), each of which is a dict
                 rule_count = len(tc_router_rules['match_rules'])
@@ -458,7 +573,7 @@ class EmailRouter:
                     rules_for_target.append(
                         EmailRouterRule(
                             match_pattern=this_rule_match_pattern,
-                            sequence=rule_match_priority
+                            match_priority=rule_match_priority
                         )
                     )
 
@@ -500,19 +615,25 @@ class EmailRouter:
 
                 self.logger.info('Validated destination for target config + ' + tc_name)
 
+                target_config = EmailRouterTargetConfig(
+                    target_name=tc_name,
+                    target_priority=target_priority,
+                    router_rules=frozenset(rules_for_target),
+                    destinations=frozenset([
+                        EmailRouterDestinationConfig(destination_sequence=10,
+                                                     destination_type=destination,
+                                                     destination_uri=destination_uri)
+                    ])
+                )
+
+                self.logger.debug('The target config = ' + os.linesep + str(target_config))
+
                 # now make a rules entry for the specified tc_name (target)
                 #  FIXME - noting that JSON only supports one destination per target config right now, but
                 #  rules database will support multiple ones.  Hard-coding sequence now
-                self.router_rules_datastore.add_target_routing_config(
-                    target_name=tc_name,
-                    router_rule_collection=rules_for_target,
-                    destination_config_collection=[
-                        EmailRouterDestinationConfig(destination_sequence=10,
-                                                     destination_type=destination,
-                                                     destination_uri=destination_uri)]
-                )
+                self.router_rules_datastore.add_target_routing_config(target_config)
 
-            self.logger.info('Completed initialization of rules configuration for target config ' + tc_name)
+                self.logger.info('Completed initialization of rules configuration for target config ' + tc_name)
 
         # getting here means success
         self._router_db_initialized = True
