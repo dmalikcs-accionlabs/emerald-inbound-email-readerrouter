@@ -60,3 +60,4 @@ class EmeraldEmailRouterConfigNotActiveError(EmeraldError):
 
 class EmeraldEmailRouterInputDataError(EmeraldError):
     pass
+

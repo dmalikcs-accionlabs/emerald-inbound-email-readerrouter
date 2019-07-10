@@ -72,6 +72,8 @@ class RouterInstanceTypeConfig(NamedTuple):
 
 @unique
 class RouterInstanceType(Enum):
+    BLACK = RouterInstanceTypeConfig(instance_type_name='black',
+                                    url_prefix='black')
     BLUE = RouterInstanceTypeConfig(instance_type_name='blue',
                                     url_prefix='blue')
     GREEN = RouterInstanceTypeConfig(instance_type_name='green',

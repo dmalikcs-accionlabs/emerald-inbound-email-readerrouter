@@ -12,6 +12,10 @@ from pytz import timezone
 from typing import NamedTuple, Optional, Collection, FrozenSet, List, Set
 from tzlocal import get_localzone
 
+from emerald_message.containers.email.email_container import EmailContainer
+from emerald_message.containers.email.email_envelope import EmailEnvelope
+from emerald_message.containers.email.email_message_metadata import EmailMessageMetadata
+
 from email_router.email_router_config_source import EmailRouterDatastoreSourceType, EmailRouterSourceConfig
 from email_router.email_router_destination import EmailRouterDestinationType, EmailRouterDestinationConfig
 from email_router.router_instance_type import RouterInstanceType
@@ -262,7 +266,6 @@ class EmailRouterRulesDatastore:
         self._router_config_by_target.add(target_config)
 
 
-
 class EmailRouter:
     @property
     def debug(self) -> bool:
@@ -482,7 +485,7 @@ class EmailRouter:
         if router_db_instance_type != self.router_instance_type:
             raise EmeraldEmailRouterDatabaseInitializationError(
                 'Specified JSON is for a different router instance type "' + router_db_instance_type.name.lower() +
-                os.linesep + 'Program specified this instance to be ' + self.router_instance_type.name.lower()
+                '"' + os.linesep + 'Program specified this instance to be ' + self.router_instance_type.name.lower()
             )
 
         # now create the initial datastore
@@ -762,6 +765,178 @@ class EmailRouter:
         self._router_rules_datastore.router_rules_datastore_initialized = True
 
     def match_inbound_email(self,
+                            email_container: EmailContainer):
+        if not self._router_rules_datastore.router_rules_datastore_initialized:
+            raise EmeraldEmailRouterConfigNotActiveError('Router match table is not active - current configuration ' +
+                                                         'entry count: ' +
+                                                         str(self._router_rules_datastore.target_count))
+        matched_info_log: List[str] = list()
+        # now sort the router match table by target first (based on target priority) and then on rules
+        #  the first match "wins"
+        matched_targets = list()
+        for this_target in sorted(self._router_rules_datastore.router_config_by_target):
+            matched_info_log.append('Evaluating match for target "' + this_target.target_name + '" at priority ' +
+                                    str(this_target.target_priority) + os.linesep)
+
+            # now iterate through the match rules.  We will take the first one we get
+            for this_rule in sorted(this_target.router_rules):
+                matched_info_log.append('Checking rule at priority ' + str(this_rule.match_priority))
+
+                #
+                # matching proceeds where all included parameters within a rule must match (i.e. AND)
+                #  the outer iteration through rules by match priority provides the "OR" for more complex cases
+                #
+
+                # split the from address into domain and name
+                try:
+                    (left, right) = email_container.email_envelope.address_from.split('@')
+                    message_sender_name: str = left
+                    message_sender_domain: str = right
+                except ValueError:
+                    raise EmeraldEmailRouterInputDataError('Input from_address invalid - should be in form ' +
+                                                           'name@domain' + os.linesep +
+                                                           'Value = ' + address_from)
+
+                # match 1 - recipient name
+                # scan the to list and see
+                if this_rule.match_pattern.recipient_name is not None:
+                    # caller will pass a collection of recipients - iterate through each and find a match
+                    for to_address_count, this_to_address in enumerate(
+                            email_container.email_envelope.address_to_collection,
+                            start=1):
+                        matched_info_log.append('Checking recipient #' + str(to_address_count) + ' (value ' +
+                                                str(this_to_address) + ')')
+
+                        try:
+                            (left, right) = this_to_address.split('@')
+                            this_to_address_name: str = left
+                            this_to_address_domain: str = right
+                        except ValueError:
+                            raise EmeraldEmailRouterInputDataError('Input recipient #' + str(to_address_count) +
+                                                                   'is invalid - should be in form ' +
+                                                                   'name@domain' + os.linesep +
+                                                                   'Value = ' + str(this_to_address))
+
+                        try:
+                            match_set = re.search(this_rule.match_pattern.recipient_name,
+                                                  this_to_address_name, re.IGNORECASE).group()
+                        except AttributeError:
+                            # means we did not get a result
+                            matched_info_log.append('Target "' + this_target.target_name +
+                                                    '" match failed on recipient #' + str(to_address_count) +
+                                                    ' check' +
+                                                    os.linesep + 'Recipient name  was "' + this_to_address_name + '"' +
+                                                    os.linesep + 'Match pattern was "' +
+                                                    this_rule.match_pattern.recipient_name + '"')
+                        else:
+                            matched_info_log.append('Target "' + this_target.target_name +
+                                                    '" passed recipient name check' + os.linesep +
+                                                    'Matched ' + str(match_set))
+                            # no need to check others
+                            break
+
+                # match 2 - sender domain
+                # when we find a match set this
+                if this_rule.match_pattern.sender_domain is not None:
+                    try:
+                        match_set = re.search(this_rule.match_pattern.sender_domain,
+                                              message_sender_domain, re.IGNORECASE).group()
+                    except AttributeError:
+                        # means we did not get a result
+                        matched_info_log.append('Target "' + this_target.target_name +
+                                                '" match failed on sender domain check' +
+                                                os.linesep + 'Sender domain  was "' + message_sender_domain + '"' +
+                                                os.linesep + 'Match pattern was "' +
+                                                this_rule.match_pattern.sender_domain + '"')
+                        break
+                    else:
+                        matched_info_log.append('Target "' + this_target.target_name + '" passed sender domain check' +
+                                                os.linesep +
+                                                'Matched ' + str(match_set))
+
+                # match 3 - sender name
+                if this_rule.match_pattern.sender_name is not None:
+                    try:
+                        match_set = re.search(this_rule.match_pattern.sender_name,
+                                              message_sender_name, re.IGNORECASE).group()
+                    except AttributeError:
+                        # means we did not get a result
+                        matched_info_log.append(
+                            'Target "' + this_target.target_name + '" match failed on sender domain check' +
+                            os.linesep + 'Sender name was "' + message_sender_name + '"' +
+                            os.linesep + 'Match pattern was "' + this_rule.match_pattern.sender_name + '"')
+                        break
+                    else:
+                        matched_info_log.append('Target "' + this_target.target_name + '" passed sender name check' +
+                                                os.linesep +
+                                                'Matched ' + str(match_set))
+
+                # match 4 - ip address whitelisting
+                if this_rule.match_pattern.sender_ip_whitelist is not None:
+                    try:
+                        sender_ip_as_address = IPAddress(email_container.email_container_metadata.email_sender_ip)
+                    except AddrFormatError:
+                        raise EmeraldEmailRouterInputDataError(
+                            'Input sender_ip invalid - cannot be converted to IP addr ' +
+                            'Value = ' + str(email_container.email_container_metadata.email_sender_ip))
+
+                    ip_matched = False
+                    for this_ip_network_count, this_ip_network in enumerate(this_rule.match_pattern.sender_ip_whitelist,
+                                                                            start=1):
+                        if sender_ip_as_address in this_ip_network:
+                            matched_info_log.append('Target "' + this_target.target_name +
+                                                    '" passed sender ip check against whitelist')
+                            ip_matched = True
+                            break
+                    if not ip_matched:
+                        matched_info_log.append('Target "' + this_target.target_name +
+                                                '" match failed on sender ip check (whitelist entry count: ' +
+                                                str(len(this_rule.match_pattern.sender_ip_whitelist)) + ') ' +
+                                                os.linesep + 'Sender ip was "' +
+                                                email_container.email_container_metadata.email_sender_ip + '"' +
+                                                os.linesep + 'Whitelist pattern was "' +
+                                                ','.join([str(x) for x in
+                                                          this_rule.match_pattern.sender_ip_whitelist]) + '"')
+                        break
+
+                # match 5 - attachment included
+                if this_rule.match_pattern.attachment_included is not None:
+                    if this_rule.match_pattern.attachment_included is True:
+                        if email_container.email_container_metadata.attachment_count == 0:
+                            matched_info_log.append('Target "' + this_target.target_name +
+                                                    '" match failed on attachment included check: ' +
+                                                    str(this_rule.match_pattern.attachment_included) + ') ' +
+                                                    os.linesep + 'Attachment count was "' +
+                                                    str(email_container.email_container_metadata.attachment_count))
+                            break
+
+
+                if this_rule.match_pattern.body_size_minimum is not None:
+                    raise NotImplementedError('Code does not yet support parsing of body_size_minimum')
+
+                if this_rule.match_pattern.body_size_maximum is not None:
+                    raise NotImplementedError('Code does not yet support parsing of body_size_maximum')
+
+                # keep track of which ones have matched in order - use a list
+                matched_targets.append(this_target)
+                # do not break out of loop - try to match another
+
+        if len(matched_targets) == 0:
+            raise EmeraldEmailRouterMatchNotFoundError('Unable to find match for target email request' +
+                                                       os.linesep + 'Activity log: ' +
+                                                       os.linesep + os.linesep.join(matched_info_log))
+
+        match_result_targets = list()
+        for this_target in matched_targets:
+            match_result_targets.append(
+                EmailRouterMatchResult(matched_target_name=this_target.target_name,
+                                       destinations=this_target.destinations))
+
+        return EmailRouterMatchResultCollection(
+            matched_info_log=matched_info_log,
+            matched_target_results=match_result_targets)
+
+    def match_inbound_email(self,
                             address_to_collection: Collection[str],
                             address_from: str,
                             sender_ip: str) -> EmailRouterMatchResultCollection:
@@ -897,7 +1072,7 @@ class EmailRouter:
                                                           this_rule.match_pattern.sender_ip_whitelist]) + '"')
                         break
 
-                # DET TODO - these are not yet implemented
+                # match 5 - attachment included
                 if this_rule.match_pattern.attachment_included is not None:
                     raise NotImplementedError('Code does not yet support parsing of attachment_included')
 
